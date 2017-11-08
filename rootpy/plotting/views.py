@@ -253,6 +253,8 @@ from __future__ import absolute_import
 
 import os
 import ROOT
+from string import Template
+from itertools import repeat
 
 from .base import Plottable
 from .hist import HistStack
@@ -301,8 +303,14 @@ class _FolderView(object):
         else:
             return str(self.dir)
 
+    def ls(self, opt=""):
+        self.dir.ls(opt)
+
     def __str__(self):
         return "{0}('{1}')".format(self.__class__.__name__, self.path())
+
+    def __repr__(self):
+        return self.__str__()
 
     def Get(self, path):
         ''' Get the (modified) object from path '''
@@ -314,6 +322,68 @@ class _FolderView(object):
             #print dir(dne)
             raise DoesNotExist(
                 str(dne) + "[{0}]".format(self.__class__.__name__))
+
+
+class TemplatingView(_FolderView):
+    '''
+    Override the name and title of gotten histograms by applying a
+    string.Template substituation for the pattern $name, $title, $get
+    '''
+    def __init__(self, directory, name, title):
+        self._set_naming(name)
+        self._set_titling(title)
+        super(TemplatingView, self).__init__(directory)
+
+    def _set_naming(self, string):
+        self._naming = Template(string)
+
+    def _set_titling(self, string):
+        self._titling = Template(string)
+
+    naming = property(lambda self: self._naming, _set_naming)
+    titling = property(lambda self: self._titling, _set_titling)
+
+    def apply_view(self, obj):
+        clone = obj.Clone()
+        clone.SetName(self.naming.safe_substitute(name=obj.GetName(), title=obj.GetTitle(), get=self.getting))
+        clone.SetTitle(self.titling.safe_substitute(name=obj.GetName(), title=obj.GetTitle(), get=self.getting))
+        return clone
+
+
+def naming_from_path(dirs, names="${name}_FROM_${cpath}", titles="${title} FROM ${cpath}"):
+    '''
+    Generates a list of TemplatingViews. It uses the same concept as introduced there,
+    but will substitute $path and $cpath, the rest of template arguments is handed over.
+
+    Instead of a single string.Template argument you can also pass an iterable
+    of length len(dirs), so that every dirs will be handeled indivdually.
+
+    The substituation parameters do not need to accour at all!
+    So a plain list of titles/names is also ok.
+    '''
+
+    if isinstance(names, str):
+        names = repeat(names)
+
+    if isinstance(titles, str):
+        titles = repeat(titles)
+
+    #  first: init with empty name and title
+    views = [TemplatingView(d, n, t) for d, n, t in zip(dirs, names, titles)]
+    paths = [v.path() for v in views]
+    cpaths = list(paths)  # first: create a copy
+
+    if len(cpaths):
+        while all(a_string[0]==cpaths[0][0] for a_string in cpaths):  # check if first char is identical
+            for idx in xrange(len(cpaths)):
+                cpaths[idx] = cpaths[idx][1:]
+
+    for v, n, t, c, p in zip(views, names, titles, cpaths, paths):
+        naming, titling = Template(n), Template(t)
+        v.naming = naming.safe_substitute(path=p, cpath=c)
+        v.titling = titling.safe_substitute(path=p, cpath=c)
+
+    return views
 
 
 class _MultiFolderView(object):
@@ -330,13 +400,19 @@ class _MultiFolderView(object):
     The subclass can get access to the queried path via the self.getting
     variable.
     '''
-    def __init__(self, *directories):
-        self.dirs = directories
+    def __init__(self, *directories, **kwargs):
+        if kwargs.pop("rename", True):
+            self.dirs = naming_from_path(directories, **kwargs)
+        else:
+            self.dirs = directories
 
     def __str__(self):
         return "{0}({1})".format(
             self.__class__.__name__,
             ','.join(str(x) for x in self.dirs))
+
+    def ls(self, opt=""):
+        self.dirs[0].ls(opt)
 
     def Get(self, path):
         ''' Merge the objects at path in all subdirectories '''
@@ -413,8 +489,8 @@ class TitleView(_FolderView):
 
 class SumView(_MultiFolderView):
     ''' Add a collection of histograms together '''
-    def __init__(self, *directories):
-        super(SumView, self).__init__(*directories)
+    def __init__(self, *directories, **kwargs):
+        super(SumView, self).__init__(*directories, **kwargs)
 
     def merge_views(self, objects):
         output = None
@@ -445,8 +521,8 @@ class StackView(_MultiFolderView):
     integral by passing the kwarg sorted=True.
     '''
     def __init__(self, *directories, **kwargs):
-        super(StackView, self).__init__(*directories)
-        self.sort = kwargs.get(sorted, False)
+        self.sort = kwargs.pop(sorted, False)
+        super(StackView, self).__init__(*directories, **kwargs)
 
     def merge_views(self, objects):
         output = None
@@ -481,9 +557,9 @@ class MultiFunctorView(_MultiFolderView):
 
     The function must take one argument, a generator of objects.
     '''
-    def __init__(self, f, *directories):
+    def __init__(self, f, *directories, **kwargs):
         self.f = f
-        super(MultiFunctorView, self).__init__(*directories)
+        super(MultiFunctorView, self).__init__(*directories, **kwargs)
 
     def merge_views(self, objects):
         return self.f(objects)
